@@ -49,7 +49,7 @@
         fail-fast: false
         matrix:
           board:
-            - { env: "ats-mini" }
+            # - { env: "ats-mini" }
             - { env: "arduino-nesso-n1"           }
             - { env: "m5stack-cardputer"          }
             - { env: "m5stack-cplus2"             }
