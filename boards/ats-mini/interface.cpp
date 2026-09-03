@@ -95,24 +95,41 @@ void _setup_gpio() {
 /***************************************************************************************
 ** Function name: _post_setup_gpio()
 ** Location:      main.cpp (called after tft->begin() + setRotation)
-** Description:   Backlight PWM + GC9307 display correction
+** Description:   Backlight PWM + GC9307 display correction (full RDDID detection)
 ***************************************************************************************/
 void _post_setup_gpio() {
     // Backlight: attach PWM on GPIO 38, set full brightness (percent 0-100)
     hal_bright_attach(TFT_BL);
     hal_bright_set(TFT_BL, 100);
 
-    // --- GC9307 panel correction ---
+    // --- GC9307 panel correction via RDDID detection ---
     //
-    // All ATS Mini units have did3 == 0x93 (mirrored & inverted variant).
-    // We apply the fix unconditionally because the PAR8 bus cannot read.
+    // Read panel ID (RDDID 0x04, byte 3) to detect panel variant:
+    //   0x93 = mirrored & inverted (needs invertDisplay(false) + MADCTL 0xE8)
+    //   0x85 = high gamma (needs GAMSET curve 8 + WRCACE 0xB1)
+    //   0xB3 = normal (no correction needed)
+    //
+    // main.cpp:236 calls invertDisplay(true) globally before this runs,
+    // so 0x93 correction must call invertDisplay(false) to override.
 
-    // Rotation is already set to 3 by main.cpp
+    tft->begin();
+    tft->setRotation(3);
 
-    // Panel 0x93: inversion OFF + MADCTL correction
-    tft->invertDisplay(false);
-    tft->dataBus()->sendCommand(0x36); // MADCTL
-    tft->dataBus()->sendData(0xE8);    // MV | MX | MY | BGR — corrects mirroring
+    uint8_t did3 = tft->readcommand8(0x04, 3);
+
+    if (did3 == 0x93) {
+        // Panel 0x93: mirrored & inverted variant
+        tft->invertDisplay(false);  // Override global invertDisplay(true)
+        tft->writecommand(0x36);    // MADCTL
+        tft->writedata(0xE8);       // MV | MX | MY | BGR — corrects mirroring
+    } else if (did3 == 0x85) {
+        // Panel 0x85: high gamma variant
+        tft->writecommand(0x26);    // GAMSET
+        tft->writedata(8);          // Gamma curve 8
+        tft->writecommand(0x55);    // WRCACE / brightness control
+        tft->writedata(0xB1);       // Enable content adaptive brightness
+    }
+    // 0xB3 = normal panel, no correction needed
 }
 
 /***************************************************************************************
