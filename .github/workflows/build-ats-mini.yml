@@ -1,130 +1,23 @@
----
-  name: Build ATS-Mini
+name: Build ATS-Mini
 
-  concurrency:
-    group: ${{ github.workflow }}-${{ github.ref }}
-    cancel-in-progress: true
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
 
-  on:
-    push:
-      branches:
-        - main
-      paths:
-        - "**.h"
-        - "**.cpp"
-        - "**.py"
-        - "**.html"
-        - "**.css"
-        - "**.js"
-        - "**.ini"
-        - "**.json"
-        - "**.csv"
-        - "Launcher/boards/ats-mini/**"
-        - ".github/workflows/build-ats-mini.yml"
-    workflow_dispatch:
-
-  jobs:
-    build-ats-mini:
-      name: Build ats-mini
-      runs-on: ubuntu-latest
-      env:
-        PLATFORMIO_CORE_DIR: ${{ github.workspace }}/.pio/core
-        PIP_DEFAULT_TIMEOUT: "120"
-        PIP_DISABLE_PIP_VERSION_CHECK: "1"
-      steps:
-          - uses: actions/checkout@v5
-            with:
-              submodules: true
-
-          - id: build
-            name: setup Python
-            uses: actions/setup-python@v6
-            with:
-              python-version: "3.13"
-
-          - name: Cache pip
-            uses: actions/cache@v5
-            with:
-              path: ~/.cache/pip
-              key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements*.txt') }}
-              restore-keys: |
-                ${{ runner.os }}-pip-${{ hashFiles('**/requirements*.txt') }}
-                ${{ runner.os }}-pip-
-
-          - name: Cache PlatformIO Framework
-            uses: actions/cache@v5
-            with:
-              path: |
-                .pio/core
-              key: ${{ runner.os }}-platformio-${{ hashFiles('platformio.ini') }}
-              restore-keys: |
-                ${{ runner.os }}-platformio-${{ hashFiles('platformio.ini') }}
-                ${{ runner.os }}-platformio-
-
-          - name: PIO libraries cache
-            uses: actions/cache@v5
-            with:
-              path: |
-                .pio/libdeps
-              key: ${{ runner.os }}-pio-ats-mini-${{ hashFiles('platformio.ini') }}
-              restore-keys: |
-                ${{ runner.os }}-pio-ats-mini-${{ hashFiles('platformio.ini') }}
-                ${{ runner.os }}-pio-ats-mini-
-
-          - name: Install dependencies
-            run: |
-              python -m pip install --upgrade pip
-              python -m pip install --retries 5 --timeout 120 requests esptool platformio
-
-              if [[ "${{ github.ref_type }}" == "tag" ]]; then
-                version=${{ github.ref_name }}
-              else
-                version="${GITHUB_SHA::7}"
-              fi
-
-              export LAUNCHER_VERSION="$version"
-
-              python - <<'PY'
-              import json
-              import os
-              import re
-              from pathlib import Path
-
-              platformio_ini = Path("platformio.ini")
-              contents = platformio_ini.read_text()
-
-              def c_string(value):
-                  return "'" + json.dumps(value) + "'"
-
-              replacements = {
-                  "LAUNCHER": c_string(os.environ["LAUNCHER_VERSION"]),
-                  "WIFI_ENC_KEY": c_string(os.environ["WIFI_ENC_KEY"]),
-              }
-
-              for name, value in replacements.items():
-                  contents = re.sub(
-                      rf"^(\s*-D{name}=).*$",
-                      rf"\g<1>{value}",
-                      contents,
-                      count=1,
-                      flags=re.MULTILINE,
-                  )
-
-              platformio_ini.write_text(contents)
-              PY
-            env:
-              WIFI_ENC_KEY: ${{ secrets.WIFI_ENC_KEY }}
-
-          - name: Run Compile
-            run: |
-              platformio run -e ats-mini
-
-          - name: Upload Artifact
-            uses: actions/upload-artifact@v6
-            with:
-              name: Launcher-ats-mini
-              path: |
-                Launcher-ats-mini.bin
-                .pio/build/ats-mini/firmware.bin
-              retention-days: 14
-              if-no-files-found: error
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          submodules: true
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+      - run: pip install platformio esptool
+      - run: pio run -e ats-mini
+      - uses: actions/upload-artifact@v6
+        with:
+          name: Launcher-ats-mini
+          path: .pio/build/ats-mini/firmware.bin
