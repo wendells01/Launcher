@@ -49,6 +49,7 @@ static DeviceEncoder encoderCfg() {
     cfg.pin_b = 1;    // Encoder B
     cfg.pin_sel = 21; // Encoder push-button (Select)
     cfg.pin_esc = -1; // No dedicated Esc button on ATS Mini
+    cfg.pullup = true; // Active-low push button idles HIGH via internal pull-up
     return cfg;
 }
 
@@ -89,7 +90,7 @@ void _setup_gpio() {
     delay(200);
 
     // Encoder pins — internal pull-ups, init via HAL
-    hal_encoder_init(encoderCfg(), EncoderLatchMode::TWO03);
+    hal_encoder_init(encoderCfg(), EncoderLatchMode::FOUR3);
 }
 
 /***************************************************************************************
