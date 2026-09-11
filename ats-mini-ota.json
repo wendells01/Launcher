@@ -1,0 +1,53 @@
+{
+  "total": 2,
+  "page": 1,
+  "page_size": 100,
+  "items": [
+    {
+      "fid": "ats-mini-original",
+      "name": "ATS Mini Original",
+      "author": "esp32-si4732",
+      "version": "v2.38",
+      "file": "https://github.com/wendells01/Launcher/releases/download/ats-mini-original-v2.38/ats-mini-original-v2.38-merged.bin",
+      "star": false
+    },
+    {
+      "fid": "bruce-ats-mini",
+      "name": "Bruce ATS Mini",
+      "author": "wendells01",
+      "version": "v1.0.0",
+      "file": "https://github.com/wendells01/bruce-ats-mini/releases/download/v1.0.0/Bruce-ats-mini-v1.0.0-merged.bin",
+      "star": false
+    }
+  ],
+  "details": {
+    "ats-mini-original": {
+      "name": "ATS Mini Original",
+      "author": "esp32-si4732",
+      "fid": "ats-mini-original",
+      "star": false,
+      "versions": [
+        {
+          "version": "v2.38",
+          "published_at": "2026-09-01T07:12:38Z",
+          "file": "https://github.com/wendells01/Launcher/releases/download/ats-mini-original-v2.38/ats-mini-original-v2.38-merged.bin",
+          "image_size": 8388608
+        }
+      ]
+    },
+    "bruce-ats-mini": {
+      "name": "Bruce ATS Mini",
+      "author": "wendells01",
+      "fid": "bruce-ats-mini",
+      "star": false,
+      "versions": [
+        {
+          "version": "v1.0.0",
+          "published_at": "2026-09-11T17:18:56Z",
+          "file": "https://github.com/wendells01/bruce-ats-mini/releases/download/v1.0.0/Bruce-ats-mini-v1.0.0-merged.bin",
+          "image_size": 3786496
+        }
+      ]
+    }
+  }
+}
