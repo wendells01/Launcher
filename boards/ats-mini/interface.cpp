@@ -68,6 +68,25 @@ static DeviceEncoder encoderCfg() {
 static unsigned long _escPressStart = 0;
 static bool _escConsumed = false;
 
+// ---------------------------------------------------------------------------
+// Short-tap bridge: edge-armed 120 ms latch that re-asserts SelPress across
+// taskInputHandler wipes (resetGlobals every ~75 ms, main.cpp:88-99) while
+// the HAL 200 ms re-fire gate (encoder.cpp:51) suppresses re-assertion.
+// Without it a tap released before the menu's next check() (:1270, once per
+// loopOptions iteration, stalled by PAR8 flushes) is lost; rotation is
+// unaffected (quadrature via GPIO interrupts, encoder.cpp:35-37).
+// Window counts from the PRESS edge and never extends on re-press, so the
+// remainder left after consume is shorter than any menu-transition path
+// (full drawOptions render + PAR8 flush before the next level's first
+// check; OTA/SD/WUI/CFG actions slower still) — one Enter per tap, no
+// double-fire. Suppressed while _escConsumed (long-press Esc) and while the
+// screen is dim/off (HAL wake-tap swallow, encoder.cpp:56-59).
+// ---------------------------------------------------------------------------
+static bool _selPrevHeld = false;
+static bool _selLatched = false;
+static unsigned long _selLatchUntil = 0;
+static const unsigned long kSelLatchMs = 120;
+
 /***************************************************************************************
 ** Function name: _setup_gpio()
 ** Location:      main.cpp (called first, before tft->begin())
@@ -204,6 +223,22 @@ void InputHandler(void) {
     // level poll past its 200 ms re-fire gate, so without this a long-press
     // would deliver BOTH Esc and Select on release.
     if (_escConsumed) SelPress = false;
+
+    // Short-tap bridge: re-assert SelPress from the edge-armed latch so one
+    // menu check() always observes the tap despite intervening wipes.
+    if (!_escConsumed && !isScreenOff && !dimmer) {
+        bool latchLive = _selLatched && (long)(now - _selLatchUntil) < 0;
+        if (btnHeld && !_selPrevHeld && !latchLive) {
+            _selLatched = true;
+            _selLatchUntil = now + kSelLatchMs;
+            latchLive = true;
+        }
+        if (latchLive) SelPress = true;
+        else _selLatched = false;
+    } else {
+        _selLatched = false;
+    }
+    _selPrevHeld = btnHeld;
 }
 
 /***************************************************************************************
