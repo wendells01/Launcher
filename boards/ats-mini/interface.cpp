@@ -307,6 +307,60 @@ extern bool installFirmwareDynamic(
 );
 extern void displayError(String txt, bool waitKeyPress);
 
+// ---------------------------------------------------------------------------
+// Static merged-image app slices (ats-mini only).
+//
+// Both catalog assets are merged factory images (bootloader + partition table
+// + app). installFirmwareDynamic with nb=true flashes the stream from byte 0
+// into the OTA app slot, so the bootloader bytes land where a valid app image
+// must be and verification/boot never switch away from Launcher. The Hub
+// manifest path handles this via install "source_offset"/"image_size"
+// (onlineLauncher.cpp installFirmwareFromManifest:786-789, nb = appOffset==0)
+// and the SD path via the embedded table + measured image length
+// (sd_functions.cpp updateFromSD:822-842 + effectiveSdAppSize:616-631).
+// We do the same SD-less: flashRawRangeFromHttp already skips sourceOffset
+// bytes of the HTTP stream (onlineLauncher.cpp:530-532), so no SD staging
+// file is needed (SDCARD_CS=-1 on this board).
+//
+// Slices below were measured offline from the release assets (partition table
+// at 0x8000, ESP-image segment walk like measureSdEspImage):
+//   - Bruce v1.0.0 (3786496 B): app@0x10000, 3720960 B = image tail
+//     (image is 16 B short of canonical pad; identical bytes to the SD path's
+//     file.size()-offset fallback, updateFromSD:828-830).
+//   - Original v2.38 (8388608 B): app@0x10000, 1698544 B measured image
+//     length (declared factory partition is 0x300000).
+// image_size must match exactly; any catalog change fails closed here so a
+// silently swapped image can never be flashed with a stale slice.
+// ---------------------------------------------------------------------------
+struct AtsMiniStaticAppSlice {
+    const char *fid;
+    uint32_t imageSize;
+    uint32_t appOffset;
+    uint32_t appSize;
+};
+
+static const AtsMiniStaticAppSlice kAtsMiniStaticAppSlices[] = {
+    {"bruce-ats-mini",    3786496, 0x10000, 3720960},
+    {"ats-mini-original", 8388608, 0x10000, 1698544},
+};
+
+static bool
+atsMiniStaticAppSlice(const String &fid, uint32_t imageSize, uint32_t &appOffset, uint32_t &appSize) {
+    for (const auto &s : kAtsMiniStaticAppSlices) {
+        if (fid == s.fid) {
+            if (imageSize != s.imageSize) {
+                displayError("Static image changed");
+                return false;
+            }
+            appOffset = s.appOffset;
+            appSize = s.appSize;
+            return true;
+        }
+    }
+    displayError("Firmware not in static catalog");
+    return false;
+}
+
 static const char *kAtsMiniOtaCatalogUrl =
     "https://raw.githubusercontent.com/wendells01/Launcher/main/ats-mini-ota.json";
 
@@ -365,10 +419,16 @@ bool launcherStaticOtaInstall(const String &fid, const String &version, const St
             displayError("Bad static install info");
             return false;
         }
+        // Merged factory image: flash only the app slice into the OTA slot
+        // (nb=false skips appOffset source bytes), mirroring the Hub manifest
+        // path. Unknown/modified images fail closed inside the lookup.
+        uint32_t appOffset = 0;
+        uint32_t appSize = 0;
+        if (!atsMiniStaticAppSlice(fid, imageSize, appOffset, appSize)) return false;
         std::vector<LauncherInstallDataPartition> noData;
         String name = detail["name"].as<String>() + " - " + version;
         if (installedName.length() && detail["name"].as<String>().isEmpty()) name = installedName;
-        if (!installFirmwareDynamic(file, file, imageSize, imageSize, 0, true, noData, name)) {
+        if (!installFirmwareDynamic(file, file, appSize, appSize, appOffset, false, noData, name)) {
             launcherDelayMs(2500);
         }
         return true;
