@@ -373,6 +373,87 @@ atsMiniStaticAppSlice(const String &fid, uint32_t imageSize, uint32_t &appOffset
     return false;
 }
 
+// ---------------------------------------------------------------------------
+// Static-install data partitions (ats-mini only).
+//
+// Root cause of the Bruce "LittleFS is Full" boot failure: this path used to
+// pass an empty vector to installFirmwareDynamic, so launcherSelectInstallLayout
+// -> launcherPartitionCreateOtaApp created ONLY the app entry. The installed
+// layout had no data partition; Bruce begin_storage() (LittleFS.begin fails,
+// LittleFS.format() fails with no partition) leaves totalBytes()==0, so
+// checkLittleFsSize() reports full on every FS access. Creating the entry in
+// the generated table is sufficient SD-less: launcherPrepareInstallDataPartitions
+// (partition_install_layout.cpp) is pure table math (no SD), and the
+// installFirmwareDynamic data loop skips flashing when copySize==0
+// (onlineLauncher.cpp: "if (!dp.hasEntry || dp.copySize == 0) continue") —
+// Bruce formats the empty partition itself at boot (begin_storage mount+format).
+//
+// Measured merged-asset tables (partition table at 0x8000, verified offline):
+//   - Bruce v1.0.0 (3786496 B): spiffs, type 0x01, subtype 0x82, label
+//     "spiffs", @0x810000 size 0x7F0000; region lies past EOF (no FS content).
+//   - Original v2.38 (8388608 B): littlefs, type 0x01, subtype 0x83, label
+//     "littlefs", @0x610000 size 0x1D0000; region reads all-0xFF (empty).
+//
+// Sizing mirrors the Hub manifest branch (onlineLauncher.cpp
+// installFirmwareFromManifest):
+//   struct fields mirrored: { subtype, label, sourceOffset, partitionSize,
+//     copySize, sourceUrl } — payload-less, so sourceOffset/copySize stay 0.
+//   Hub sizing lines mirrored:
+//     "if (dp.label != "label" && dp.copySize > 0 &&
+//         declaredSize > LAUNCHER_DEFAULT_SPIFFS_SIZE)
+//          dp.partitionSize = declaredSize;
+//      else if (declaredSize > LAUNCHER_DEFAULT_SPIFFS_THRESHOLD)
+//          dp.partitionSize = LAUNCHER_INSTALL_USE_REMAINING_SPIFFS_SIZE;
+//      else
+//          dp.partitionSize = LAUNCHER_DEFAULT_SPIFFS_SIZE;"
+//   - Bruce: declared 0x7F0000 > LAUNCHER_DEFAULT_SPIFFS_THRESHOLD (0x500000 on
+//     this board) -> LAUNCHER_INSTALL_USE_REMAINING_SPIFFS_SIZE. The 0x7F0000
+//     is NOT copied wholesale: the OTA slot remainder on this 16 MB layout is
+//     smaller, and USE_REMAINING maximizes Bruce's FS (JS, configs) in whatever
+//     free space is left, exactly as the Hub path would.
+//   - Original: declared 0x1D0000 <= 0x500000 threshold and no payload, so both
+//     the Hub branch and the SD branch (sd_functions.cpp: partitionEmpty &&
+//     declaredSize <= THRESHOLD -> DEFAULT) yield LAUNCHER_DEFAULT_SPIFFS_SIZE
+//     (0x70000 at runtime on >4 MB flash). Added because the merged table
+//     declares a littlefs the radio firmware mounts for settings — same
+//     missing-partition failure mode if absent; harmless (empty, validated) if
+//     a future image stops using it.
+//
+// Fit arithmetic (16 MB flash = 0x1000000; support_files/custom_16Mb.csv ends
+// at coredump 0x190000+0x10000 = 0x1A0000; free = 0xE60000):
+//   - Bruce app slot alignUp(3720960, 0x10000) = 0x390000 at 0x1A0000 ->
+//     0x1A0000-0x530000; data takes largest remainder 0x530000-0x1000000.
+//   - Original app slot alignUp(1698544, 0x10000) = 0x1A0000 at 0x1A0000 ->
+//     0x1A0000-0x340000; data fixed 0x70000; required 0x210000 << 0xE60000.
+// Unknown fid fails closed via displayError, no flash.
+// ---------------------------------------------------------------------------
+static bool
+atsMiniStaticDataPartitions(const String &fid, std::vector<LauncherInstallDataPartition> &dataPartitions) {
+    dataPartitions.clear();
+    if (fid == "bruce-ats-mini") {
+        LauncherInstallDataPartition dp;
+        dp.subtype = 0x82; // SPIFFS, mirrors Bruce merged-table entry
+        dp.label = "spiffs";
+        dp.sourceOffset = 0;
+        dp.partitionSize = LAUNCHER_INSTALL_USE_REMAINING_SPIFFS_SIZE;
+        dp.copySize = 0;
+        dataPartitions.push_back(dp);
+        return true;
+    }
+    if (fid == "ats-mini-original") {
+        LauncherInstallDataPartition dp;
+        dp.subtype = 0x83; // LittleFS, mirrors Original merged-table entry
+        dp.label = "littlefs";
+        dp.sourceOffset = 0;
+        dp.partitionSize = LAUNCHER_DEFAULT_SPIFFS_SIZE;
+        dp.copySize = 0;
+        dataPartitions.push_back(dp);
+        return true;
+    }
+    displayError("Firmware not in static catalog");
+    return false;
+}
+
 static const char *kAtsMiniOtaCatalogUrl =
     "https://raw.githubusercontent.com/wendells01/Launcher/main/ats-mini-ota.json";
 
@@ -437,10 +518,11 @@ bool launcherStaticOtaInstall(const String &fid, const String &version, const St
         uint32_t appOffset = 0;
         uint32_t appSize = 0;
         if (!atsMiniStaticAppSlice(fid, imageSize, appOffset, appSize)) return false;
-        std::vector<LauncherInstallDataPartition> noData;
+        std::vector<LauncherInstallDataPartition> dataPartitions;
+        if (!atsMiniStaticDataPartitions(fid, dataPartitions)) return false;
         String name = detail["name"].as<String>() + " - " + version;
         if (installedName.length() && detail["name"].as<String>().isEmpty()) name = installedName;
-        if (!installFirmwareDynamic(file, file, appSize, appSize, appOffset, false, noData, name)) {
+        if (!installFirmwareDynamic(file, file, appSize, appSize, appOffset, false, dataPartitions, name)) {
             launcherDelayMs(2500);
         }
         return true;
