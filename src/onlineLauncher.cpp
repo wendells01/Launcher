@@ -695,7 +695,22 @@ String normalizeExtraQuery(String extra) {
     return extra;
 }
 
+// Static OTA catalog hooks (ats-mini only). Weak defaults keep every other board on
+// the LauncherHub path; the ats-mini board file provides strong overrides that serve
+// a runtime-fetched static JSON catalog instead. Each hook returns true when handled.
+bool __attribute__((weak)) launcherStaticOtaList(JsonDocument &) { return false; }
+bool __attribute__((weak)) launcherStaticOtaVersions(const String &, JsonDocument &) { return false; }
+bool __attribute__((weak)) launcherStaticOtaInstall(const String &, const String &, const String &) {
+    return false;
+}
+
 bool GetJsonFromLauncherHub(uint8_t page, const String &order, bool star, const String &query) {
+    if (launcherStaticOtaList(doc)) {
+        total_firmware = doc["total"].as<int>();
+        num_pages = doc["total"].as<int>() / doc["page_size"].as<int>();
+        current_page = page;
+        return true;
+    }
     String q = "&order_by=" + order;
     q += page > 1 ? "&page=" + String(page) : "";
     q += query.length() > 0 ? "&q=" + encodeQueryValue(query) : "";
@@ -719,6 +734,7 @@ bool GetJsonFromLauncherHub(uint8_t page, const String &order, bool star, const 
 }
 JsonDocument getVersionInfo(const String &fid) {
     JsonDocument versions(launcherJsonAllocator());
+    if (launcherStaticOtaVersions(fid, versions)) return versions;
     String serverUrl = "https://api.launcherhub.net/firmwares?fid=" + fid;
     if (!getInfo(serverUrl, versions)) displayError("Version fetch Failed");
     return versions;
@@ -747,6 +763,7 @@ static String resolveDataPartitionSource(JsonObject part, JsonObject sources) {
 }
 
 void installFirmwareFromManifest(const String &fid, const String &version, String installedName) {
+    if (launcherStaticOtaInstall(fid, version, installedName)) return;
     JsonDocument detail(launcherJsonAllocator());
     String serverUrl =
         "https://api.launcherhub.net/firmwares?fid=" + fid + "&version=" + encodeQueryValue(version);

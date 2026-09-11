@@ -18,9 +18,13 @@
 #include "powerSave.h"
 #include <interface.h>
 
+#include <Arduino.h>
+#include <ArduinoJson.h>
+
 #include "hal/bright/bright.h"
 #include "hal/device.h"
 #include "hal/inputs/encoder.h"
+#include "partition_install_layout.h"
 
 // ---------------------------------------------------------------------------
 // Display panel: always GC9307 on the ATS Mini.
@@ -45,10 +49,10 @@
 // ---------------------------------------------------------------------------
 static DeviceEncoder encoderCfg() {
     DeviceEncoder cfg;
-    cfg.pin_a = 2;    // Encoder A
-    cfg.pin_b = 1;    // Encoder B
-    cfg.pin_sel = 21; // Encoder push-button (Select)
-    cfg.pin_esc = -1; // No dedicated Esc button on ATS Mini
+    cfg.pin_a = 2;     // Encoder A
+    cfg.pin_b = 1;     // Encoder B
+    cfg.pin_sel = 21;  // Encoder push-button (Select)
+    cfg.pin_esc = -1;  // No dedicated Esc button on ATS Mini
     cfg.pullup = true; // Active-low push button idles HIGH via internal pull-up
     return cfg;
 }
@@ -164,19 +168,15 @@ void _setBrightness(uint8_t brightval) { hal_bright_set(TFT_BL, brightval); }
 ** Description:   Read encoder rotation/press; detect long-press for Esc
 ***************************************************************************************/
 void InputHandler(void) {
-    // Reset per-cycle press flags
-    checkPowerSaveTime();
-    PrevPress = false;
-    NextPress = false;
-    SelPress = false;
-    AnyKeyPress = false;
-    EscPress = false;
-
-    // Let the HAL read encoder rotation and short press.
-    // With pin_esc == -1 the HAL never sets EscPress.
+    // Rotation + short-press Select come straight from the HAL, matching the
+    // reference encoder board (lilygo-t-embed-cc1101). The task loop already
+    // calls resetGlobals() before every cycle, so no flag clearing here, and
+    // no busy-wait: spinning this task while flags are set holds the input
+    // lock and lets the next resetGlobals() wipe an unconsumed SelPress.
+    // With pin_esc == -1 the HAL never sets EscPress (see detector below).
     hal_encoder_poll(encoderCfg());
 
-    // --- Board-specific long-press Esc detection ---
+    // --- Board-specific long-press Esc detection (non-blocking) ---
     // GPIO 21 is the encoder push-button.  Track how long it has been
     // held LOW.  If > 600 ms, fire EscPress and consume the press.
     bool btnHeld = (digitalRead(encoderCfg().pin_sel) == LOW);
@@ -196,18 +196,6 @@ void InputHandler(void) {
         // Button released — reset timer
         _escPressStart = 0;
         _escConsumed = false;
-    }
-
-    // Mark AnyKeyPress if any logical input was registered
-    if (PrevPress || NextPress || SelPress || EscPress) { AnyKeyPress = true; }
-
-    // Debounce: if any key is pressed, wait briefly so the same press
-    // is not re-read on the next cycle.
-    if (AnyKeyPress) {
-        unsigned long t = launcherMillis();
-        while ((launcherMillis() - t) < 200 && (PrevPress || NextPress || SelPress || EscPress)) {
-            // encoder may still be moving; HAL poll not needed here
-        }
     }
 }
 
@@ -245,4 +233,94 @@ void checkReboot() {
         vTaskDelay(pdMS_TO_TICKS(50));
     }
     vTaskResume(xHandle);
+}
+
+// ---------------------------------------------------------------------------
+// Static OTA catalog (ats-mini only).
+//
+// LauncherHub has no ats-mini entries, so these strong overrides replace the
+// weak default-false hooks in src/onlineLauncher.cpp and serve a static
+// catalog fetched at runtime from a public JSON file. Fetch failures surface
+// through displayError and fail closed (no partial flash, no Hub fallback).
+// Installs reuse installFirmwareDynamic with merged factory images (@0x0);
+// the direct URLs are used as-is because the Hub download proxy only serves
+// Hub-registered fids.
+// ---------------------------------------------------------------------------
+
+extern bool getInfo(const String &serverUrl, JsonDocument &doc, JsonDocument *filter);
+extern bool installFirmwareDynamic(
+    const String &fileAddr, const String &file, uint32_t appSize, uint32_t appPartitionSize,
+    uint32_t appOffset, bool nb, std::vector<LauncherInstallDataPartition> &dataPartitions,
+    const String &installedName
+);
+extern void displayError(String txt, bool waitKeyPress);
+
+static const char *kAtsMiniOtaCatalogUrl =
+    "https://raw.githubusercontent.com/wendells01/Launcher/main/ats-mini-ota.json";
+
+static bool fetchAtsMiniOtaCatalog(JsonDocument &catalog) {
+    if (!getInfo(String(kAtsMiniOtaCatalogUrl), catalog, nullptr)) {
+        displayError("Static OTA catalog fetch failed");
+        return false;
+    }
+    return true;
+}
+
+bool launcherStaticOtaList(JsonDocument &listDoc) {
+    if (!fetchAtsMiniOtaCatalog(listDoc)) return false;
+    if (listDoc["items"].isNull()) {
+        displayError("Static OTA catalog has no items");
+        return false;
+    }
+    return true;
+}
+
+bool launcherStaticOtaVersions(const String &fid, JsonDocument &versionsDoc) {
+    JsonDocument catalog;
+    if (!fetchAtsMiniOtaCatalog(catalog)) return false;
+    JsonObject detail = catalog["details"][fid].as<JsonObject>();
+    if (detail.isNull() || detail["versions"].isNull()) {
+        displayError("Firmware not in static catalog");
+        return false;
+    }
+    versionsDoc["name"] = detail["name"].as<String>();
+    versionsDoc["author"] = detail["author"].as<String>();
+    versionsDoc["fid"] = fid;
+    versionsDoc["star"] = detail["star"].as<bool>();
+    versionsDoc["versions"].to<JsonArray>();
+    for (JsonObject v : detail["versions"].as<JsonArray>()) {
+        JsonObject out = versionsDoc["versions"].add<JsonObject>();
+        out["version"] = v["version"].as<String>();
+        out["published_at"] = v["published_at"].as<String>();
+        out["file"] = v["file"].as<String>();
+    }
+    return true;
+}
+
+bool launcherStaticOtaInstall(const String &fid, const String &version, const String &installedName) {
+    JsonDocument catalog;
+    if (!fetchAtsMiniOtaCatalog(catalog)) return false;
+    JsonObject detail = catalog["details"][fid].as<JsonObject>();
+    if (detail.isNull()) {
+        displayError("Firmware not in static catalog");
+        return false;
+    }
+    for (JsonObject v : detail["versions"].as<JsonArray>()) {
+        if (v["version"].as<String>() != version) continue;
+        String file = v["file"].as<String>();
+        uint32_t imageSize = v["image_size"].as<uint32_t>();
+        if (file.isEmpty() || imageSize == 0) {
+            displayError("Bad static install info");
+            return false;
+        }
+        std::vector<LauncherInstallDataPartition> noData;
+        String name = detail["name"].as<String>() + " - " + version;
+        if (installedName.length() && detail["name"].as<String>().isEmpty()) name = installedName;
+        if (!installFirmwareDynamic(file, file, imageSize, imageSize, 0, true, noData, name)) {
+            launcherDelayMs(2500);
+        }
+        return true;
+    }
+    displayError("Version not in static catalog");
+    return false;
 }
