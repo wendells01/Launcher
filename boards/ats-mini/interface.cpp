@@ -197,6 +197,13 @@ void InputHandler(void) {
         _escPressStart = 0;
         _escConsumed = false;
     }
+
+    // Esc-consume invariant (companion to the Bruce-port checkReboot below):
+    // once a >600 ms hold has fired EscPress, keep Select suppressed while
+    // the button stays down. hal_encoder_poll() re-asserts SelPress on every
+    // level poll past its 200 ms re-fire gate, so without this a long-press
+    // would deliver BOTH Esc and Select on release.
+    if (_escConsumed) SelPress = false;
 }
 
 /***************************************************************************************
@@ -224,15 +231,25 @@ void reboot() { ESP.restart(); }
 ** Description:   Long-press encoder button (>2 s) triggers powerOff
 ***************************************************************************************/
 void checkReboot() {
+    // Bruce-port power-off detector (see Bruce/boards/ats-mini/interface.cpp,
+    // checkReboot: count 100 ms ticks while the push-button reads LOW,
+    // powerOff() after ~2 s). Bruce's version just spins — it never suspends
+    // the sampler. The previous code called vTaskSuspend(xHandle) for the
+    // whole press, freezing taskInputHandler/hal_encoder_poll: any Select tap
+    // that reached checkReboot() — called every loop() iteration AFTER the
+    // check(SelPress) consume point — before the input task sampled it was
+    // never sampled, and flags sampled just before were wiped by the next
+    // resetGlobals() after resume. Rotation survived because quadrature counts
+    // accumulate via GPIO interrupts regardless of task suspension.
+    // Short taps return on the first read (button already HIGH), so the input
+    // task keeps polling and SelPress reaches the menu.
     if (digitalRead(encoderCfg().pin_sel) != LOW) return;
 
-    vTaskSuspend(xHandle);
-    unsigned long start = launcherMillis();
+    int c = 0;
     while (digitalRead(encoderCfg().pin_sel) == LOW) {
-        if (launcherMillis() - start > 2000) { powerOff(); }
-        vTaskDelay(pdMS_TO_TICKS(50));
+        vTaskDelay(pdMS_TO_TICKS(100));
+        if (++c > 20) { powerOff(); } // ~2 s long press
     }
-    vTaskResume(xHandle);
 }
 
 // ---------------------------------------------------------------------------
