@@ -69,12 +69,13 @@ static unsigned long _escPressStart = 0;
 static bool _escConsumed = false;
 
 // ---------------------------------------------------------------------------
-// Short-tap bridge: edge-armed 120 ms latch that re-asserts SelPress across
+// Short-tap bridge: edge-armed 250 ms latch that re-asserts SelPress across
 // taskInputHandler wipes (resetGlobals every ~75 ms, main.cpp:88-99) while
 // the HAL 200 ms re-fire gate (encoder.cpp:51) suppresses re-assertion.
 // Without it a tap released before the menu's next check() (:1270, once per
-// loopOptions iteration, stalled by PAR8 flushes) is lost; rotation is
-// unaffected (quadrature via GPIO interrupts, encoder.cpp:35-37).
+// loopOptions iteration, stalled by PAR8 flushes and 200 ms scroll steps at
+// display.cpp:34) is lost; rotation is unaffected (quadrature via GPIO
+// interrupts, encoder.cpp:35-37).
 // Window counts from the PRESS edge and never extends on re-press, so the
 // remainder left after consume is shorter than any menu-transition path
 // (full drawOptions render + PAR8 flush before the next level's first
@@ -85,7 +86,17 @@ static bool _escConsumed = false;
 static bool _selPrevHeld = false;
 static bool _selLatched = false;
 static unsigned long _selLatchUntil = 0;
-static const unsigned long kSelLatchMs = 120;
+// 250 ms covers the worst menu-check gap with margin: the input task samples
+// every ~75 ms once AnyKeyPress is set (main.cpp:88) and a redraw iteration
+// adds a full drawOptions render + PAR8 flush (display.cpp:718-869, worst when
+// displayScrollingText fires a scroll step: 200 ms deadTime gate at
+// display.cpp:34, each step a full tft->display flush). No double-Enter: the
+// flag is consumed destructively by check() (globals.h:151-156), and after
+// consume the menu unwinds through drawOptionsErase + operation() + break
+// (display.cpp:1270-1274) plus a full render before any next menu's first
+// check — strictly longer than a steady-state iteration, so the leftover
+// window always expires mid-transition.
+static const unsigned long kSelLatchMs = 250;
 
 /***************************************************************************************
 ** Function name: _setup_gpio()
@@ -266,24 +277,25 @@ void reboot() { ESP.restart(); }
 ** Description:   Long-press encoder button (>2 s) triggers powerOff
 ***************************************************************************************/
 void checkReboot() {
-    // Bruce-port power-off detector (see Bruce/boards/ats-mini/interface.cpp,
-    // checkReboot: count 100 ms ticks while the push-button reads LOW,
-    // powerOff() after ~2 s). Bruce's version just spins — it never suspends
-    // the sampler. The previous code called vTaskSuspend(xHandle) for the
-    // whole press, freezing taskInputHandler/hal_encoder_poll: any Select tap
-    // that reached checkReboot() — called every loop() iteration AFTER the
-    // check(SelPress) consume point — before the input task sampled it was
-    // never sampled, and flags sampled just before were wiped by the next
-    // resetGlobals() after resume. Rotation survived because quadrature counts
-    // accumulate via GPIO interrupts regardless of task suspension.
-    // Short taps return on the first read (button already HIGH), so the input
-    // task keeps polling and SelPress reaches the menu.
-    if (digitalRead(encoderCfg().pin_sel) != LOW) return;
-
-    int c = 0;
-    while (digitalRead(encoderCfg().pin_sel) == LOW) {
-        vTaskDelay(pdMS_TO_TICKS(100));
-        if (++c > 20) { powerOff(); } // ~2 s long press
+    // Non-blocking power-off detector: the old version parked the loop task in
+    // `while (LOW) vTaskDelay(100)` for the whole hold, so any press held past
+    // the 250 ms tap latch expired before the menu's next check(SelPress) and
+    // the tap was lost (main-menu loss window was the hold itself, up to the
+    // ~2 s power-off threshold). Same 100 ms tick accounting, same >2 s
+    // powerOff, but the loop task keeps reaching the menu checks every pass,
+    // so the latch only has to cover input phase + one redraw iteration.
+    // Short taps return after one read, exactly like before.
+    static unsigned long lastTick = 0;
+    static unsigned int heldTicks = 0;
+    unsigned long now = millis();
+    if (digitalRead(encoderCfg().pin_sel) != LOW) {
+        heldTicks = 0;
+        lastTick = now;
+        return;
+    }
+    if (now - lastTick >= 100) {
+        lastTick = now;
+        if (++heldTicks > 20) { powerOff(); } // ~2 s long press
     }
 }
 
