@@ -341,6 +341,15 @@ extern void displayError(String txt, bool waitKeyPress);
 //     file.size()-offset fallback, updateFromSD:828-830).
 //   - Original v2.38 (8388608 B): app@0x10000, 1698544 B measured image
 //     length (declared factory partition is 0x300000).
+//   - English v2025.09.22, hub release ats-mini-english-v2025.09.22
+//     (3378864 B): app@0x10000, 3313328 B. 6-segment walk, magic e9
+//     (`e906 024f 4c6f 3740 ee00 0000 0900 0000`); canonical end lands 16 B
+//     past EOF (same Bruce pattern), so the SD-path tail fallback
+//     file.size()-offset applies: 3378864-0x10000 = 3313328.
+//   - Marauder v2026.09.09, hub release ats-mini-marauder-v2026.09.09
+//     (8388608 B): app@0x10000, 2022928 B measured image length (7-segment
+//     walk, magic e9 `e907 023f ac5f 3740 ee00 0000 0900 0000`); equals the
+//     ats-mini.ino.bin split length exactly.
 // image_size must match exactly; any catalog change fails closed here so a
 // silently swapped image can never be flashed with a stale slice.
 // ---------------------------------------------------------------------------
@@ -354,6 +363,8 @@ struct AtsMiniStaticAppSlice {
 static const AtsMiniStaticAppSlice kAtsMiniStaticAppSlices[] = {
     {"bruce-ats-mini",    3786496, 0x10000, 3720960},
     {"ats-mini-original", 8388608, 0x10000, 1698544},
+    {"ats-mini-english",  3378864, 0x10000, 3313328},
+    {"ats-mini-marauder", 8388608, 0x10000, 2022928},
 };
 
 static bool
@@ -393,6 +404,10 @@ atsMiniStaticAppSlice(const String &fid, uint32_t imageSize, uint32_t &appOffset
 //     "spiffs", @0x810000 size 0x7F0000; region lies past EOF (no FS content).
 //   - Original v2.38 (8388608 B): littlefs, type 0x01, subtype 0x83, label
 //     "littlefs", @0x610000 size 0x1D0000; region reads all-0xFF (empty).
+//   - English v2025.09.22 (3378864 B): spiffs, type 0x01, subtype 0x82,
+//     label "spiffs", @0xC90000 size 0x360000 (app0/app1 0x640000 each).
+//   - Marauder v2026.09.09 (8388608 B): littlefs, type 0x01, subtype 0x83,
+//     label "littlefs", @0x610000 size 0x1D0000 (same layout as Original).
 //
 // Sizing mirrors the Hub manifest branch (onlineLauncher.cpp
 // installFirmwareFromManifest):
@@ -418,6 +433,11 @@ atsMiniStaticAppSlice(const String &fid, uint32_t imageSize, uint32_t &appOffset
 //     declares a littlefs the radio firmware mounts for settings — same
 //     missing-partition failure mode if absent; harmless (empty, validated) if
 //     a future image stops using it.
+//   - English: declared spiffs 0x360000 <= 0x500000 threshold, copySize=0, so
+//     the Hub branch (copySize>0 required for declared-size adoption) yields
+//     LAUNCHER_DEFAULT_SPIFFS_SIZE — same bucket as Original.
+//   - Marauder: declared littlefs 0x1D0000 <= threshold, copySize=0 ->
+//     LAUNCHER_DEFAULT_SPIFFS_SIZE — identical to Original (same table).
 //
 // Fit arithmetic (16 MB flash = 0x1000000; support_files/custom_16Mb.csv ends
 // at coredump 0x190000+0x10000 = 0x1A0000; free = 0xE60000):
@@ -425,6 +445,10 @@ atsMiniStaticAppSlice(const String &fid, uint32_t imageSize, uint32_t &appOffset
 //     0x1A0000-0x530000; data takes largest remainder 0x530000-0x1000000.
 //   - Original app slot alignUp(1698544, 0x10000) = 0x1A0000 at 0x1A0000 ->
 //     0x1A0000-0x340000; data fixed 0x70000; required 0x210000 << 0xE60000.
+//   - English app slot alignUp(3313328, 0x10000) = 0x330000 at 0x1A0000 ->
+//     0x1A0000-0x4D0000; data fixed 0x70000; required 0x3A0000 << 0xE60000.
+//   - Marauder app slot alignUp(2022928, 0x10000) = 0x1F0000 at 0x1A0000 ->
+//     0x1A0000-0x390000; data fixed 0x70000; required 0x260000 << 0xE60000.
 // Unknown fid fails closed via displayError, no flash.
 // ---------------------------------------------------------------------------
 static bool
@@ -450,12 +474,32 @@ atsMiniStaticDataPartitions(const String &fid, std::vector<LauncherInstallDataPa
         dataPartitions.push_back(dp);
         return true;
     }
+    if (fid == "ats-mini-english") {
+        LauncherInstallDataPartition dp;
+        dp.subtype = 0x82; // SPIFFS, mirrors English merged-table entry
+        dp.label = "spiffs";
+        dp.sourceOffset = 0;
+        dp.partitionSize = LAUNCHER_DEFAULT_SPIFFS_SIZE;
+        dp.copySize = 0;
+        dataPartitions.push_back(dp);
+        return true;
+    }
+    if (fid == "ats-mini-marauder") {
+        LauncherInstallDataPartition dp;
+        dp.subtype = 0x83; // LittleFS, mirrors Marauder merged-table entry
+        dp.label = "littlefs";
+        dp.sourceOffset = 0;
+        dp.partitionSize = LAUNCHER_DEFAULT_SPIFFS_SIZE;
+        dp.copySize = 0;
+        dataPartitions.push_back(dp);
+        return true;
+    }
     displayError("Firmware not in static catalog");
     return false;
 }
 
 static const char *kAtsMiniOtaCatalogUrl =
-    "https://raw.githubusercontent.com/wendells01/Launcher/main/ats-mini-ota.json";
+    "https://raw.githubusercontent.com/wendells01/ats-mini-hub/main/ats-mini-ota.json";
 
 static bool fetchAtsMiniOtaCatalog(JsonDocument &catalog) {
     if (!getInfo(String(kAtsMiniOtaCatalogUrl), catalog, nullptr)) {
