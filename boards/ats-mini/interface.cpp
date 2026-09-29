@@ -339,8 +339,15 @@ extern void displayError(String txt, bool waitKeyPress);
 //   - Bruce v1.0.0 (3786496 B): app@0x10000, 3720960 B = image tail
 //     (image is 16 B short of canonical pad; identical bytes to the SD path's
 //     file.size()-offset fallback, updateFromSD:828-830).
-//   - Original v2.38 (8388608 B): app@0x10000, 1698544 B measured image
-//     length (declared factory partition is 0x300000).
+//   - Original v2.41 (8388608 B): app@0x10000, 1796208 B = the ats-mini.ino.bin
+//     split length exactly (7-segment walk, magic e9; checksum byte sits at
+//     align16(segments_end)-1, 32 B hash at align16(segments_end)-1+1 aligned).
+//     Declared factory app partition is 0x300000, so it fits.
+//     CAREFUL: upstream reuses the SAME image_size (8388608) across v2.38
+//     (1698544 B), v2.39 (1698336 B) and v2.41 (1796208 B), so the exact-match
+//     guard above cannot catch an upstream bump — re-measure this appSize on
+//     every upstream release, or the install silently flashes a truncated
+//     image (v2.41 is 97664 B longer than v2.38's value).
 //   - English v2025.09.22, hub release ats-mini-english-v2025.09.22
 //     (3378864 B): app@0x10000, 3313328 B. 6-segment walk, magic e9
 //     (`e906 024f 4c6f 3740 ee00 0000 0900 0000`); canonical end lands 16 B
@@ -362,7 +369,7 @@ struct AtsMiniStaticAppSlice {
 
 static const AtsMiniStaticAppSlice kAtsMiniStaticAppSlices[] = {
     {"bruce-ats-mini",    3786496, 0x10000, 3720960},
-    {"ats-mini-original", 8388608, 0x10000, 1698544},
+    {"ats-mini-original", 8388608, 0x10000, 1796208},
     {"ats-mini-english",  3378864, 0x10000, 3313328},
     {"ats-mini-marauder", 8388608, 0x10000, 2022928},
 };
