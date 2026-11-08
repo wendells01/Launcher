@@ -24,6 +24,7 @@
 #include "hal/bright/bright.h"
 #include "hal/device.h"
 #include "hal/inputs/encoder.h"
+#include "ota_range.h"
 #include "partition_install_layout.h"
 
 // ---------------------------------------------------------------------------
@@ -566,11 +567,27 @@ bool launcherStaticOtaInstall(const String &fid, const String &version, const St
             displayError("Bad static install info");
             return false;
         }
-        // Merged images use an app slice; standalone OTA images start at zero.
-        // Unknown image sizes fail closed inside the lookup.
+        // The catalog describes the app slice; older catalogs use known slices.
         uint32_t appOffset = 0;
         uint32_t appSize = 0;
-        if (!atsMiniStaticAppSlice(fid, imageSize, appOffset, appSize)) return false;
+        JsonVariant offsetValue = v["app_offset"];
+        JsonVariant sizeValue = v["app_size"];
+        if (offsetValue.isNull() && sizeValue.isNull()) {
+            // Compatibility with catalogs published for older Launchers.
+            if (!atsMiniStaticAppSlice(fid, imageSize, appOffset, appSize)) return false;
+        } else {
+            if (!offsetValue.is<uint32_t>() || !sizeValue.is<uint32_t>()) {
+                displayError("Bad app info");
+                return false;
+            }
+            appOffset = offsetValue.as<uint32_t>();
+            appSize = sizeValue.as<uint32_t>();
+            // Subtraction avoids overflow when validating the requested range.
+            if (!atsMiniValidOtaRange(imageSize, appOffset, appSize)) {
+                displayError("Bad app range");
+                return false;
+            }
+        }
         std::vector<LauncherInstallDataPartition> dataPartitions;
         if (!atsMiniStaticDataPartitions(fid, dataPartitions)) return false;
         String name = detail["name"].as<String>() + " - " + version;
