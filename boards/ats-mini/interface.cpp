@@ -339,15 +339,15 @@ extern void displayError(String txt, bool waitKeyPress);
 //   - Bruce v1.0.0 (3786496 B): app@0x10000, 3720960 B = image tail
 //     (image is 16 B short of canonical pad; identical bytes to the SD path's
 //     file.size()-offset fallback, updateFromSD:828-830).
-//   - Original v2.41 (8388608 B): app@0x10000, 1796208 B = the ats-mini.ino.bin
+//   - Original v2.45 (8388609 B, one 0xFF byte appended): app@0x10000,
+//     1799648 B = the ats-mini.ino.bin
 //     split length exactly (7-segment walk, magic e9; checksum byte sits at
 //     align16(segments_end)-1, 32 B hash at align16(segments_end)-1+1 aligned).
 //     Declared factory app partition is 0x300000, so it fits.
-//     CAREFUL: upstream reuses the SAME image_size (8388608) across v2.38
-//     (1698544 B), v2.39 (1698336 B) and v2.41 (1796208 B), so the exact-match
-//     guard above cannot catch an upstream bump — re-measure this appSize on
-//     every upstream release, or the install silently flashes a truncated
-//     image (v2.41 is 97664 B longer than v2.38's value).
+//     The extra byte distinguishes it from v2.41 and makes old Launcher
+//     versions reject the new image. Re-measure and use a distinct image size
+//     for each upstream release to prevent a truncated app being installed.
+//   - PV2KSM r30D (2681392 B): standalone OSPI OTA app, offset 0.
 //   - English v2025.09.22, hub release ats-mini-english-v2025.09.22
 //     (3378864 B): app@0x10000, 3313328 B. 6-segment walk, magic e9
 //     (`e906 024f 4c6f 3740 ee00 0000 0900 0000`); canonical end lands 16 B
@@ -370,6 +370,8 @@ struct AtsMiniStaticAppSlice {
 static const AtsMiniStaticAppSlice kAtsMiniStaticAppSlices[] = {
     {"bruce-ats-mini",    3786496, 0x10000, 3720960},
     {"ats-mini-original", 8388608, 0x10000, 1796208},
+    {"ats-mini-original", 8388609, 0x10000, 1799648},
+    {"ats-mini-pv2ksm",   2681392, 0,       2681392},
     {"ats-mini-english",  3378864, 0x10000, 3313328},
     {"ats-mini-marauder", 8388608, 0x10000, 2022928},
 };
@@ -377,17 +379,13 @@ static const AtsMiniStaticAppSlice kAtsMiniStaticAppSlices[] = {
 static bool
 atsMiniStaticAppSlice(const String &fid, uint32_t imageSize, uint32_t &appOffset, uint32_t &appSize) {
     for (const auto &s : kAtsMiniStaticAppSlices) {
-        if (fid == s.fid) {
-            if (imageSize != s.imageSize) {
-                displayError("Static image changed");
-                return false;
-            }
+        if (fid == s.fid && imageSize == s.imageSize) {
             appOffset = s.appOffset;
             appSize = s.appSize;
             return true;
         }
     }
-    displayError("Firmware not in static catalog");
+    displayError("Static image changed");
     return false;
 }
 
@@ -471,7 +469,7 @@ atsMiniStaticDataPartitions(const String &fid, std::vector<LauncherInstallDataPa
         dataPartitions.push_back(dp);
         return true;
     }
-    if (fid == "ats-mini-original") {
+    if (fid == "ats-mini-original" || fid == "ats-mini-pv2ksm") {
         LauncherInstallDataPartition dp;
         dp.subtype = 0x83; // LittleFS, mirrors Original merged-table entry
         dp.label = "littlefs";
@@ -479,6 +477,11 @@ atsMiniStaticDataPartitions(const String &fid, std::vector<LauncherInstallDataPa
         dp.partitionSize = LAUNCHER_DEFAULT_SPIFFS_SIZE;
         dp.copySize = 0;
         dataPartitions.push_back(dp);
+        LauncherInstallDataPartition settings;
+        settings.subtype = 0x02;
+        settings.label = "settings";
+        settings.partitionSize = 0x10000;
+        dataPartitions.push_back(settings);
         return true;
     }
     if (fid == "ats-mini-english") {
@@ -563,9 +566,8 @@ bool launcherStaticOtaInstall(const String &fid, const String &version, const St
             displayError("Bad static install info");
             return false;
         }
-        // Merged factory image: flash only the app slice into the OTA slot
-        // (nb=false skips appOffset source bytes), mirroring the Hub manifest
-        // path. Unknown/modified images fail closed inside the lookup.
+        // Merged images use an app slice; standalone OTA images start at zero.
+        // Unknown image sizes fail closed inside the lookup.
         uint32_t appOffset = 0;
         uint32_t appSize = 0;
         if (!atsMiniStaticAppSlice(fid, imageSize, appOffset, appSize)) return false;
@@ -573,7 +575,9 @@ bool launcherStaticOtaInstall(const String &fid, const String &version, const St
         if (!atsMiniStaticDataPartitions(fid, dataPartitions)) return false;
         String name = detail["name"].as<String>() + " - " + version;
         if (installedName.length() && detail["name"].as<String>().isEmpty()) name = installedName;
-        if (!installFirmwareDynamic(file, file, appSize, appSize, appOffset, false, dataPartitions, name)) {
+        if (!installFirmwareDynamic(
+                file, file, appSize, appSize, appOffset, appOffset == 0, dataPartitions, name
+            )) {
             launcherDelayMs(2500);
         }
         return true;
