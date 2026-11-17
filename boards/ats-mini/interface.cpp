@@ -20,6 +20,9 @@
 
 #include <Arduino.h>
 #include <ArduinoJson.h>
+#include <mbedtls/base64.h>
+#include <memory>
+#include <new>
 
 #include "hal/bright/bright.h"
 #include "hal/device.h"
@@ -337,9 +340,11 @@ extern void displayError(String txt, bool waitKeyPress);
 //
 // Slices below were measured offline from the release assets (partition table
 // at 0x8000, ESP-image segment walk like measureSdEspImage):
-//   - Bruce v1.0.0 (3786496 B): app@0x10000, 3720960 B = image tail
-//     (image is 16 B short of canonical pad; identical bytes to the SD path's
-//     file.size()-offset fallback, updateFromSD:828-830).
+//   - Bruce (any version): the asset is bootloader+table+app with no trailing
+//     padding, so the app is always the image tail and is derived instead of
+//     tabulated (see atsMiniStaticAppSlice). A catalog-side Bruce update then
+//     needs no new Launcher build. Verified on v1.0.0 (3786496 -> 3720960) and
+//     on the 1.17 build (4171552 -> 4106016, ESP-image walk ends at EOF).
 //   - Original v2.45 (8388609 B, one 0xFF byte appended): app@0x10000,
 //     1799648 B = the ats-mini.ino.bin
 //     split length exactly (7-segment walk, magic e9; checksum byte sits at
@@ -358,8 +363,9 @@ extern void displayError(String txt, bool waitKeyPress);
 //     (8388608 B): app@0x10000, 2022928 B measured image length (7-segment
 //     walk, magic e9 `e907 023f ac5f 3740 ee00 0000 0900 0000`); equals the
 //     ats-mini.ino.bin split length exactly.
-// image_size must match exactly; any catalog change fails closed here so a
-// silently swapped image can never be flashed with a stale slice.
+// For the tabulated fids image_size must match exactly; any catalog change
+// fails closed here so a silently swapped image can never be flashed with a
+// stale slice. Bruce is derived (see above) because its app is always the tail.
 // ---------------------------------------------------------------------------
 struct AtsMiniStaticAppSlice {
     const char *fid;
@@ -369,7 +375,6 @@ struct AtsMiniStaticAppSlice {
 };
 
 static const AtsMiniStaticAppSlice kAtsMiniStaticAppSlices[] = {
-    {"bruce-ats-mini",    3786496, 0x10000, 3720960},
     {"ats-mini-original", 8388608, 0x10000, 1796208},
     {"ats-mini-original", 8388609, 0x10000, 1799648},
     {"ats-mini-pv2ksm",   2681392, 0,       2681392},
@@ -379,6 +384,17 @@ static const AtsMiniStaticAppSlice kAtsMiniStaticAppSlices[] = {
 
 static bool
 atsMiniStaticAppSlice(const String &fid, uint32_t imageSize, uint32_t &appOffset, uint32_t &appSize) {
+    // Bruce: app is the image tail (no padding), so derive it. Bounds keep the
+    // slice inside app0 (0x10000..0x410000) and reject an implausibly small app.
+    if (fid == "bruce-ats-mini") {
+        if (imageSize <= 0x10000 + 0x80000 || imageSize > 0x10000 + 0x400000) {
+            displayError("Static image changed");
+            return false;
+        }
+        appOffset = 0x10000;
+        appSize = imageSize - appOffset;
+        return true;
+    }
     for (const auto &s : kAtsMiniStaticAppSlices) {
         if (fid == s.fid && imageSize == s.imageSize) {
             appOffset = s.appOffset;
@@ -447,8 +463,8 @@ atsMiniStaticAppSlice(const String &fid, uint32_t imageSize, uint32_t &appOffset
 //
 // Fit arithmetic (16 MB flash = 0x1000000; support_files/custom_16Mb.csv ends
 // at coredump 0x190000+0x10000 = 0x1A0000; free = 0xE60000):
-//   - Bruce app slot alignUp(3720960, 0x10000) = 0x390000 at 0x1A0000 ->
-//     0x1A0000-0x530000; data takes largest remainder 0x530000-0x1000000.
+//   - Bruce app slot alignUp(imageSize-0x10000, 0x10000) at 0x1A0000, data takes
+//     the rest: 1.17 image 0x3F0000 -> 0x1A0000-0x590000, data 0x590000-0x1000000.
 //   - Original app slot alignUp(1698544, 0x10000) = 0x1A0000 at 0x1A0000 ->
 //     0x1A0000-0x340000; data fixed 0x70000; required 0x210000 << 0xE60000.
 //   - English app slot alignUp(3313328, 0x10000) = 0x330000 at 0x1A0000 ->
@@ -510,13 +526,48 @@ atsMiniStaticDataPartitions(const String &fid, std::vector<LauncherInstallDataPa
 }
 
 static const char *kAtsMiniOtaCatalogUrl =
-    "https://raw.githubusercontent.com/wendells01/ats-mini-hub/main/ats-mini-ota.json";
+    "https://api.github.com/repos/wendells01/ats-mini-hub/contents/ats-mini-ota.json?ref=main";
 
 static bool fetchAtsMiniOtaCatalog(JsonDocument &catalog) {
-    if (!getInfo(String(kAtsMiniOtaCatalogUrl), catalog, nullptr)) {
+    static JsonDocument cachedCatalog;
+    static unsigned long cachedAt = 0;
+    if (!cachedCatalog["items"].isNull() && millis() - cachedAt < 60000UL) {
+        catalog = cachedCatalog;
+        return true;
+    }
+    JsonDocument response;
+    if (!getInfo(String(kAtsMiniOtaCatalogUrl), response, nullptr)) {
         displayError("Static OTA catalog fetch failed");
         return false;
     }
+    const char *content = response["content"];
+    if (!content || response["encoding"] != "base64") {
+        displayError("Bad catalog response");
+        return false;
+    }
+    size_t outputSize = 0;
+    mbedtls_base64_decode(
+        nullptr, 0, &outputSize, reinterpret_cast<const unsigned char *>(content), strlen(content)
+    );
+    if (outputSize == 0 || outputSize > 65536) {
+        displayError("Bad catalog size");
+        return false;
+    }
+    std::unique_ptr<unsigned char[]> decoded(new (std::nothrow) unsigned char[outputSize]);
+    if (!decoded ||
+        mbedtls_base64_decode(
+            decoded.get(),
+            outputSize,
+            &outputSize,
+            reinterpret_cast<const unsigned char *>(content),
+            strlen(content)
+        ) != 0 ||
+        deserializeJson(catalog, reinterpret_cast<const char *>(decoded.get()), outputSize)) {
+        displayError("Bad catalog data");
+        return false;
+    }
+    cachedCatalog = catalog;
+    cachedAt = millis();
     return true;
 }
 
@@ -562,6 +613,14 @@ bool launcherStaticOtaInstall(const String &fid, const String &version, const St
     for (JsonObject v : detail["versions"].as<JsonArray>()) {
         if (v["version"].as<String>() != version) continue;
         String file = v["file"].as<String>();
+        String directFile = v["direct_file"].as<String>();
+        if (directFile.length()) {
+            if (!directFile.startsWith("https://api.github.com/repos/wendells01/ats-mini-hub/git/blobs/")) {
+                displayError("Bad direct URL");
+                return false;
+            }
+            file = directFile;
+        }
         uint32_t imageSize = v["image_size"].as<uint32_t>();
         if (file.isEmpty() || imageSize == 0) {
             displayError("Bad static install info");

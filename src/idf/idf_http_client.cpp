@@ -79,6 +79,9 @@ bool executeGet(
 
     auto applyHeaders = [&]() {
         esp_http_client_set_header(client, "Accept-Encoding", "identity");
+        if (url && strstr(url, "https://api.github.com/repos/wendells01/ats-mini-hub/git/blobs/") == url) {
+            esp_http_client_set_header(client, "Accept", "application/vnd.github.raw+json");
+        }
         if (headerKey && headerValue) esp_http_client_set_header(client, headerKey, headerValue);
         if (header2Key && header2Value) esp_http_client_set_header(client, header2Key, header2Value);
     };

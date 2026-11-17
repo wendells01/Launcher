@@ -572,7 +572,7 @@ bool installFirmwareDynamic(
         for (const auto &dp : dataPartitions) {
             if (!dp.hasEntry) continue;
             if (dp.subtype == 0x81) fatLabels.push_back(dp.label);
-            else registeredSpiffsLabel = dp.label;
+            else if (dp.subtype == 0x82 || dp.subtype == 0x83) registeredSpiffsLabel = dp.label;
         }
         launcherSaveInstalledAppMetadata(
             table, appEntry, file, installedName, fatLabels, registeredSpiffsLabel
