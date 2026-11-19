@@ -472,6 +472,10 @@ atsMiniStaticAppSlice(const String &fid, uint32_t imageSize, uint32_t &appOffset
 //   - Marauder app slot alignUp(2022928, 0x10000) = 0x1F0000 at 0x1A0000 ->
 //     0x1A0000-0x390000; data fixed 0x70000; required 0x260000 << 0xE60000.
 // Unknown fid fails closed via displayError, no flash.
+//
+// This table is the fallback for catalogs that predate the optional
+// `data_partitions` field: when a version carries it, the catalog describes the
+// layout itself and no branch here is needed.
 // ---------------------------------------------------------------------------
 static bool
 atsMiniStaticDataPartitions(const String &fid, std::vector<LauncherInstallDataPartition> &dataPartitions) {
@@ -647,8 +651,36 @@ bool launcherStaticOtaInstall(const String &fid, const String &version, const St
                 return false;
             }
         }
+        // The catalog can describe the data layout itself, so a new firmware
+        // family needs no Launcher change. Entries without it fall back to the
+        // built-in table below (older catalogs).
         std::vector<LauncherInstallDataPartition> dataPartitions;
-        if (!atsMiniStaticDataPartitions(fid, dataPartitions)) return false;
+        JsonArray dataParts = v["data_partitions"].as<JsonArray>();
+        if (dataParts.isNull()) {
+            if (!atsMiniStaticDataPartitions(fid, dataPartitions)) return false;
+        } else {
+            for (JsonObject p : dataParts) {
+                LauncherInstallDataPartition dp;
+                dp.label = p["label"].as<String>();
+                uint32_t subtype = p["subtype"] | 0;
+                uint32_t size = p["size"] | 0;
+                bool duplicate = false;
+                for (const auto &known : dataPartitions)
+                    if (known.label == dp.label) duplicate = true;
+                if (dp.label.isEmpty() || dp.label.length() > 15 || subtype == 0 || subtype > 0xFF ||
+                    size == 0 || duplicate || dataPartitions.size() >= 4) {
+                    displayError("Bad data partitions");
+                    return false;
+                }
+                dp.subtype = (uint8_t)subtype;
+                dp.partitionSize = size;
+                dataPartitions.push_back(dp);
+            }
+            if (dataPartitions.empty()) {
+                displayError("Bad data partitions");
+                return false;
+            }
+        }
         String name = detail["name"].as<String>() + " - " + version;
         if (installedName.length() && detail["name"].as<String>().isEmpty()) name = installedName;
         if (!installFirmwareDynamic(
